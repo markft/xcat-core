@@ -53,6 +53,7 @@ use Thread qw(yield);
 use Socket;
 use Net::SSLeay qw(die_now die_if_ssl_error);
 use POSIX "WNOHANG";
+use Sys::Hostname;
 my $tfactor = 0;
 my $vpdhash;
 my %bmc_comm_pids;
@@ -94,15 +95,15 @@ sub handled_commands {
 
 
 
+#<LOCFG VERSION="2.21"/>
 my $INITIAL_HEADER = '
-<LOCFG VERSION="2.21"/>
 <RIBCL VERSION="2.0">
 <LOGIN USER_LOGIN="AdMiNnAmE" PASSWORD="PaSsWoRd">';
 
 
 # Command Definitions
 my $GET_HOST_POWER_STATUS = '
-<SERVER_INFO MODE="write">
+<SERVER_INFO MODE="read">
 <GET_HOST_POWER_STATUS/>
 </SERVER_INFO>
 </LOGIN>
@@ -294,17 +295,60 @@ sub sendScript($$)
     my $host   = shift;
     my $script = shift;
     my ($ssl, $reply, $lastreply, $res, $n);
-    $ssl = openSSLconnection($host);
+    my $scriptlen = length($script);
+    my $localhost = hostname() || 'localhost';
+    my $ilo2 = 0;
+    my $ilo3 = 0;
 
-    # write header
-    $n = Net::SSLeay::ssl_write_all($ssl, '<?xml version="1.0"?>' . "\r\n");
-    print "Wrote $n\n" if $globalDebug;
-    $n = Net::SSLeay::ssl_write_all($ssl, '<LOCFG version="2.21"/>' . "\r\n");
-    print "Wrote $n\n" if $globalDebug;
+    #-- Test the version of ILO 1 & 2 use HTTP/1.0, 3 and above use HTTP/1.1
+    $ssl = openSSLconnection($host);
+    $n = Net::SSLeay::ssl_write_all($ssl, "POST /ribcl HTTP/1.1\r\n");
+    $n = Net::SSLeay::ssl_write_all($ssl, "HOST: $localhost\r\n");
+    $n = Net::SSLeay::ssl_write_all($ssl, "User-Agent: hpilo\r\n");
+    $n = Net::SSLeay::ssl_write_all($ssl, "Connection: Close\r\n");
+    $n = Net::SSLeay::ssl_write_all($ssl, "Content-length: 30\r\n");
+    $n = Net::SSLeay::ssl_write_all($ssl, "\r\n");
+    $n = Net::SSLeay::ssl_write_all($ssl, "<RIBCL VERSION=\"2.0\"></RIBCL>\r\n");
+
+    $lastreply = Net::SSLeay::read($ssl);
+    if ($lastreply =~ m/HTTP.1.1 200 OK/) {
+        print "\n----- Found iLO3 or iLO4 or iLO5 or iLO6\n" if ($globalDebug);
+        $ilo3 = 1;                                  # It is iLO 3
+    }
+    else {
+        print "\n----- Found iLO2 or iLO\n" if ($globalDebug);
+        $ilo2 = 1;
+    }
+
+    while(Net::SSLeay::read($ssl) && length($lastreply)!=0) {};         # Empty response buffer
+    closeSSLconnection($ssl);
+    #--- end of version test
+
+    $ssl = openSSLconnection($host);
+    #--- ILO3 and above
+    if ($ilo3) {
+        # write header
+        print "Writing HTTP/1.1\n" if ($globalDebug);
+        $n = Net::SSLeay::ssl_write_all($ssl, "POST /ribcl HTTP/1.1\r\n");
+        $n = Net::SSLeay::ssl_write_all($ssl, "HOST: $localhost\r\n");
+        $n = Net::SSLeay::ssl_write_all($ssl, "User-Agent: hpilo\r\n");
+        $n = Net::SSLeay::ssl_write_all($ssl, "TE: chunked\r\n");
+        $n = Net::SSLeay::ssl_write_all($ssl, "Connection: Close\r\n");
+        $n = Net::SSLeay::ssl_write_all($ssl, "Content-length: $scriptlen\r\n");
+        $n = Net::SSLeay::ssl_write_all($ssl, "\r\n");
+    } else {  
+    #--- ILO1 or 2
+        print "Writing HTTP/1.0\n" if ($globalDebug);
+        $n = Net::SSLeay::ssl_write_all($ssl, '<?xml version="1.0"?>' . "\r\n");
+        print "Wrote $n\n" if $globalDebug;
+        $n = Net::SSLeay::ssl_write_all($ssl, '<LOCFG version="2.21"/>' . "\r\n");
+        print "Wrote $n\n" if $globalDebug;
+    }
 
     # write script
     $n = Net::SSLeay::ssl_write_all($ssl, $script);
     print "Wrote $n\n$script\n" if $globalDebug;
+
     $reply     = "";
     $lastreply = "";
     my $reply2return;
